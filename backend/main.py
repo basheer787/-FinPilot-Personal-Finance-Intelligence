@@ -24,7 +24,10 @@ SESSION_SECRET = os.getenv('SESSION_SECRET', '')
 try:
     from google import genai
     from google.genai import types
-    ai = genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(timeout=10000)) if GEMINI_API_KEY else None
+    # Gemini can take longer than a few seconds under load; allow a 30 second
+    # request window while keeping the timeout configurable for deployment.
+    ai_timeout_ms = int(os.getenv('GEMINI_TIMEOUT_MS', '30000'))
+    ai = genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(timeout=ai_timeout_ms)) if GEMINI_API_KEY else None
 except Exception:
     genai = None; types = None; ai = None
 
@@ -229,7 +232,7 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
     return JSONResponse(status_code=422, content={'error': readable, 'detail': readable})
 
 @app.get('/')
-def root(): return {'name':'FinPilot API','ok':True,'docs':'/docs','health':'/api/health','database':'SQLite'}
+def root(): return {'name':'FinPilot API','ok':True,'docs':'/docs','health':'/api/health','database':'PostgreSQL' if DATABASE_URL else 'SQLite'}
 @app.get('/favicon.ico')
 def favicon(): return JSONResponse(status_code=204, content=None)
 
