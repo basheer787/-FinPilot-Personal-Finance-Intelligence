@@ -27,10 +27,10 @@ cd backend
 & "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" -m venv .venv
 .venv\Scripts\activate
 python -m pip install -r requirements.txt
-copy .env.example .env
+notepad .env
 ```
 
-Edit `backend/.env` after copying the example and set a random `SESSION_SECRET` with at least 32 characters. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. New users can create an account from the sign-up page. Add your own Gemini key to `GEMINI_API_KEY` to enable generative extraction, receipt reading, and monthly insights. The example model is `gemini-3.8-flash`; choose a model ID available to your own API key if needed. Never share or commit `.env`.
+In `backend/.env`, set `SESSION_SECRET` to a random value of at least 32 characters. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. New users can create an account from the sign-up page. Add `GEMINI_API_KEY` with your own key to enable generative extraction, receipt reading, and monthly insights. Set `GEMINI_MODEL` to a model ID available to your key if needed. Never share or commit `.env`.
 
 Sign-up creates a separate account; passwords are stored as salted PBKDF2 hashes and all financial records are scoped to the account in the signed 12-hour session. If `SESSION_SECRET` is missing or shorter than 32 characters, the API refuses sign-in and sign-up.
 
