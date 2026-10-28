@@ -13,7 +13,7 @@ FinPilot is a full-stack finance assistant. It turns unstructured text, browser 
 ## Technology
 - Frontend: React + Vite + lucide-react
 - Backend: Python + FastAPI + Pydantic schema validation
-- Database: SQLite (no external database service or database credentials required)
+- Database: SQLite for local use; PostgreSQL when `DATABASE_URL` is configured for hosting
 - AI: Google Gemini API (optional for most text workflows; required for image/PDF receipt extraction)
 
 ## Windows setup
@@ -39,6 +39,17 @@ Sign-up creates a separate account; passwords are stored as salted PBKDF2 hashes
 The root `render.yaml` defines a FastAPI service, a React static site, a persistent disk for SQLite, and secret prompts for the session secret and Gemini API key. To deploy, push this folder to a Git provider repository, then create a **Blueprint** from that repository in Render. Render generates `SESSION_SECRET`; users then create their own accounts from the sign-up page. The blueprint uses a persistent disk for the database; persistent storage requires a paid Render web service. Render needs the repository and your account authorization, so the live deployment URL is not created from this local workspace. Once deployment succeeds, add its public frontend URL to `REPORT.md`.
 
 If Render assigns a suffixed hostname because the default service names are already in use, update the frontend `VITE_API_URL` to the API hostname and the API `CLIENT_ORIGIN` to the frontend URL in the Render dashboard, then redeploy both services. Never commit `.env`, a database file, an API key, or a login password.
+
+### Vercel free deployment
+
+Vercel can deploy this repository as two projects from the same GitHub repo. Hosted accounts and finance records require PostgreSQL: create a Supabase Postgres project, then copy its **Transaction pooler** connection string from **Connect**. Set it as `DATABASE_URL` in the Vercel API project; the backend uses PostgreSQL whenever this variable is set and SQLite locally otherwise. Do not use SQLite on Vercel because its function filesystem is not persistent.
+
+1. In Vercel, import this GitHub repository as a project with **Root Directory** `backend`. Vercel detects FastAPI from `main.py` and `requirements.txt`.
+2. Add API environment variables: `DATABASE_URL` (Supabase transaction-pooler URL with SSL), `SESSION_SECRET` (random value of at least 32 characters), and `CLIENT_ORIGIN` (the frontend Vercel URL after step 3). Add `GEMINI_API_KEY` only if you want Gemini-powered extraction and receipt reading.
+3. Import the same GitHub repository again as a second Vercel project with **Root Directory** `frontend`. Set `VITE_API_URL` to the API project's deployment URL, then deploy.
+4. Copy the frontend deployment URL into the API project's `CLIENT_ORIGIN` and redeploy the API. Open the frontend, create an account, and verify the API at `/api/health`.
+
+The Supabase free database can pause after a week without enough activity; it can be resumed from the Supabase dashboard. Store connection strings and secrets only in Vercel environment settings, never in GitHub. See [Vercel monorepo setup](https://vercel.com/docs/monorepos), [Vercel FastAPI deployment](https://vercel.com/kb/guide/ship-a-fastapi-app-on-vercel), and [Supabase connection methods](https://supabase.com/docs/guides/database/connecting-to-postgres).
 
 Start the API:
 

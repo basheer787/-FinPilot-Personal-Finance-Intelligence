@@ -21,12 +21,12 @@ flowchart LR
   V -->|No| E[Actionable validation error]
   V -->|Yes| F
   F -->|User confirms reviewed draft| A
-  A -->|Create transaction / goal; upsert budget| D[(SQLite)]
+  A -->|Create transaction / goal; upsert budget| D[(SQLite locally / PostgreSQL hosted)]
   D --> A
   A -->|Saved record and confirmation| F
 ```
 
-**Technology stack:** React and Vite frontend; Python and FastAPI backend; Pydantic request/schema validation; SQLite database; Google Gemini API for generative extraction, receipt reading and monthly analysis. If Gemini is not configured or fails during text extraction/goal planning, the app offers a rule-based local fallback and visibly identifies that mode. Receipt reading requires Gemini.
+**Technology stack:** React and Vite frontend; Python and FastAPI backend; Pydantic request/schema validation; SQLite locally and PostgreSQL when `DATABASE_URL` is configured for hosting; Google Gemini API for generative extraction, receipt reading and monthly analysis. If Gemini is not configured or fails during text extraction/goal planning, the app offers a rule-based local fallback. Receipt reading requires Gemini.
 
 ## Schema-guided extraction
 
@@ -64,7 +64,7 @@ The generated record is a draft first. The frontend displays editable fields and
 
 ## Database and operations
 
-SQLite tables store transactions, savings goals, category budgets and monthly insight records. `POST /api/transactions` inserts the reviewed transaction and returns the saved database row; `GET /api/transactions` and `GET /api/summary` read it back for frontend confirmation and dashboard totals. `POST /api/goals` creates a confirmed savings goal. `PUT /api/budgets` inserts or updates one category limit with SQLite `ON CONFLICT`, making budget changes repeatable. Monthly budget totals are calculated from saved expense transactions for the current month.
+Database tables store transactions, savings goals, category budgets and monthly insight records. SQLite is used locally; setting `DATABASE_URL` switches the backend to PostgreSQL for serverless hosting. `POST /api/transactions` inserts the reviewed transaction and returns the saved database row; `GET /api/transactions` and `GET /api/summary` read it back for frontend confirmation and dashboard totals. `POST /api/goals` creates a confirmed savings goal. `PUT /api/budgets` inserts or updates one category limit with `ON CONFLICT`, making budget changes repeatable. Monthly budget totals are calculated from saved expense transactions for the current month.
 
 ## Interfaces and test cases
 
@@ -74,7 +74,7 @@ Automated backend coverage is in `backend/tests/test_api.py`:
 
 | Scenario | Expected result |
 |---|---|
-| Health and root endpoints | API reports a connected SQLite database |
+| Health and root endpoints | API reports a connected database |
 | Sign-in and route protection | Valid credentials return a session; wrong credentials and unauthenticated ledger requests are rejected |
 | Account sign-up and isolation | Creates a password hash, saves a record, and keeps it out of another account's ledger |
 | Extract a valid expense | Returns a typed draft and does not write it yet |
@@ -91,9 +91,9 @@ The frontend production build and Python syntax compilation passed during this r
 - Users review drafts before financial records or goals are saved; monthly recommendations never modify budgets automatically.
 - The project is an educational tracker and does not connect to banks or provide financial advice.
 - Voice recognition depends on browser support and microphone permission. Gemini receipt extraction requires a valid key and supported model.
-- Local fallback extraction is rule-based rather than generative. SQLite is intended for a local or single-instance demonstration and needs persistent storage when hosted.
-- Future work: user authentication and per-user data isolation, recurring transactions, edit/delete history, broader locale/currency support, server-side rate limits, and a hosted database.
+- Local fallback extraction is rule-based rather than generative. Hosted deployments require a managed PostgreSQL database; SQLite is intended for local development.
+- Future work: recurring transactions, edit/delete history, broader locale/currency support, and server-side rate limits.
 
 ## Deployment submission
 
-**Frontend URL:** Not deployed from this workspace. The [Render Blueprint](render.yaml) defines the API, static frontend and persistent SQLite disk. Deployment requires the project to be pushed to a Git provider and connected to a Render account; enter private login credentials and optional Gemini API key during setup. Add the resulting public frontend URL here before submission.
+**Frontend URL:** Not deployed yet. For free Vercel deployment, create separate Vercel projects rooted at `backend/` and `frontend/`, and configure PostgreSQL through `DATABASE_URL`. Render's current Blueprint uses a paid service and persistent SQLite disk. Add the resulting public frontend URL here after deployment.

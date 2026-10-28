@@ -15,6 +15,7 @@ load_dotenv(BASE_DIR / '.env')
 DB_PATH = Path(os.getenv('SQLITE_PATH', str(BASE_DIR / 'finpilot.db'))).expanduser()
 if not DB_PATH.is_absolute():
     DB_PATH = (BASE_DIR / DB_PATH).resolve()
+DATABASE_URL = os.getenv('DATABASE_URL', '').strip()
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '').strip()
 GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-3.8-flash').strip()
 LOGIN_USERNAME = os.getenv('APP_LOGIN_USERNAME', '').strip()
@@ -36,7 +37,20 @@ origin_regex = os.getenv('CLIENT_ORIGIN_REGEX', '').strip() or None
 app.add_middleware(CORSMiddleware, allow_origins=origins, allow_origin_regex=origin_regex, allow_credentials=False, allow_methods=['*'], allow_headers=['*'])
 
 
+class PostgresConnection:
+    """Small adapter so the existing parameterized SQL works with psycopg."""
+    def __init__(self, connection): self.connection = connection
+    def __enter__(self): self.connection.__enter__(); return self
+    def __exit__(self, exc_type, exc, tb): return self.connection.__exit__(exc_type, exc, tb)
+    def execute(self, query, params=()):
+        return self.connection.execute(query.replace('?', '%s'), params)
+
 def connect():
+    if DATABASE_URL:
+        import psycopg
+        from psycopg.rows import dict_row
+        con = psycopg.connect(DATABASE_URL, sslmode='require', row_factory=dict_row, prepare_threshold=None)
+        return PostgresConnection(con)
     con = sqlite3.connect(DB_PATH, timeout=10)
     con.row_factory = sqlite3.Row
     con.execute('PRAGMA foreign_keys=ON')
@@ -58,6 +72,37 @@ def verify_password(password: str, encoded: str) -> bool:
         return False
 
 def init_db():
+    if DATABASE_URL:
+        schema = [
+            '''CREATE TABLE IF NOT EXISTS users (
+              id BIGSERIAL PRIMARY KEY, username TEXT NOT NULL UNIQUE,
+              passwordHash TEXT NOT NULL, createdAt TEXT NOT NULL)''',
+            '''CREATE TABLE IF NOT EXISTS transactions (
+              id BIGSERIAL PRIMARY KEY, amount DOUBLE PRECISION NOT NULL, currency TEXT NOT NULL DEFAULT 'INR',
+              merchant TEXT, category TEXT NOT NULL, transactionDate TEXT, paymentMethod TEXT, note TEXT NOT NULL,
+              transactionType TEXT NOT NULL, originalInput TEXT, createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL,
+              userId BIGINT REFERENCES users(id))''',
+            '''CREATE TABLE IF NOT EXISTS goals (
+              id BIGSERIAL PRIMARY KEY, title TEXT NOT NULL, targetAmount DOUBLE PRECISION NOT NULL,
+              deadline TEXT NOT NULL, monthlySaving DOUBLE PRECISION NOT NULL, milestones TEXT NOT NULL,
+              originalInput TEXT, createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL,
+              userId BIGINT REFERENCES users(id))''',
+            '''CREATE TABLE IF NOT EXISTS budgets (
+              userId BIGINT NOT NULL REFERENCES users(id), category TEXT NOT NULL,
+              monthlyLimit DOUBLE PRECISION NOT NULL, createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL,
+              PRIMARY KEY(userId,category))''',
+            '''CREATE TABLE IF NOT EXISTS insights (
+              id BIGSERIAL PRIMARY KEY, month TEXT NOT NULL, result TEXT NOT NULL, createdAt TEXT NOT NULL,
+              userId BIGINT REFERENCES users(id))''',
+        ]
+        with connect() as c:
+            for statement in schema: c.execute(statement)
+            if LOGIN_USERNAME and LOGIN_PASSWORD:
+                existing = c.execute('SELECT id FROM users WHERE lower(username)=lower(?)',(LOGIN_USERNAME,)).fetchone()
+                if not existing:
+                    c.execute('INSERT INTO users(username,passwordHash,createdAt) VALUES(?,?,?) RETURNING id',
+                               (LOGIN_USERNAME.lower(),hash_password(LOGIN_PASSWORD),datetime.utcnow().isoformat()))
+        return
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with connect() as c:
         c.executescript('''
@@ -262,21 +307,28 @@ def extract_transaction(text: str):
     return local_transaction(text)
 
 def row_dict(row):
-    d=dict(row); d['_id']=str(d.pop('id'))
+    d=db_dict(row); d['_id']=str(d.pop('id'))
     if 'milestones' in d and isinstance(d['milestones'],str):
         try:d['milestones']=json.loads(d['milestones'])
         except: pass
     return d
 
+def db_dict(row):
+    aliases = {name.lower(): name for name in (
+        'passwordHash','createdAt','updatedAt','userId','transactionDate','paymentMethod',
+        'transactionType','originalInput','targetAmount','monthlySaving','monthlyLimit',
+    )}
+    return {aliases.get(str(key).lower(), key): value for key, value in dict(row).items()}
+
 @app.get('/api/health')
-def health(): return {'ok':True,'database':'connected','databaseType':'SQLite','databasePath':str(DB_PATH),'ai':'configured' if ai else 'fallback mode','model':GEMINI_MODEL,'loginConfigured':len(SESSION_SECRET)>=32}
+def health(): return {'ok':True,'database':'connected','databaseType':'PostgreSQL' if DATABASE_URL else 'SQLite','databasePath':None if DATABASE_URL else str(DB_PATH),'ai':'configured' if ai else 'fallback mode','model':GEMINI_MODEL,'loginConfigured':len(SESSION_SECRET)>=32}
 @app.post('/api/auth/login')
 def login(req: LoginRequest):
     if len(SESSION_SECRET) < 32:
         raise HTTPException(503, 'Workspace sessions are not configured. Set SESSION_SECRET in backend/.env to a random value of at least 32 characters, then restart the backend.')
     with connect() as c:
         user=c.execute('SELECT id,username,passwordHash FROM users WHERE lower(username)=lower(?)',(req.username.strip(),)).fetchone()
-    if not user or not verify_password(req.password,user['passwordHash']): raise HTTPException(401, 'Username or password is incorrect.')
+    if not user or not verify_password(req.password,db_dict(user)['passwordHash']): raise HTTPException(401, 'Username or password is incorrect.')
     return {'token':make_session(user['id'],user['username']), 'username':user['username'], 'expiresIn':43200}
 @app.post('/api/auth/signup', status_code=201)
 def signup(req: SignupRequest):
@@ -288,10 +340,12 @@ def signup(req: SignupRequest):
     now=datetime.utcnow().isoformat()
     try:
         with connect() as c:
-            cur=c.execute('INSERT INTO users(username,passwordHash,createdAt) VALUES(?,?,?)',(username,hash_password(req.password),now))
-            user_id=cur.lastrowid
-    except sqlite3.IntegrityError:
-        raise HTTPException(409, 'An account with that username or email already exists.')
+            row=c.execute('INSERT INTO users(username,passwordHash,createdAt) VALUES(?,?,?) RETURNING id',(username,hash_password(req.password),now)).fetchone()
+            user_id=row['id']
+    except Exception as exc:
+        if isinstance(exc, sqlite3.IntegrityError) or type(exc).__name__ in ('IntegrityError','UniqueViolation'):
+            raise HTTPException(409, 'An account with that username or email already exists.')
+        raise
     return {'token':make_session(user_id,username),'username':username,'expiresIn':43200}
 @app.post('/api/transactions/extract')
 def transaction_extract(req: ExtractRequest, _: int = Depends(require_session)): return {'transaction':extract_transaction(req.input).model_dump()}
@@ -299,8 +353,7 @@ def transaction_extract(req: ExtractRequest, _: int = Depends(require_session)):
 def transaction_save(req: SaveRequest, user_id: int = Depends(require_session)):
     d=req.transaction.model_dump(); now=datetime.utcnow().isoformat()
     with connect() as c:
-        cur=c.execute('INSERT INTO transactions(amount,currency,merchant,category,transactionDate,paymentMethod,note,transactionType,originalInput,createdAt,updatedAt,userId) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', (d['amount'],d['currency'],d['merchant'],d['category'],d['transactionDate'],d['paymentMethod'],d['note'],d['transactionType'],(req.originalInput or '')[:1500],now,now,user_id))
-        row=c.execute('SELECT * FROM transactions WHERE id=?',(cur.lastrowid,)).fetchone()
+        row=c.execute('INSERT INTO transactions(amount,currency,merchant,category,transactionDate,paymentMethod,note,transactionType,originalInput,createdAt,updatedAt,userId) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *', (d['amount'],d['currency'],d['merchant'],d['category'],d['transactionDate'],d['paymentMethod'],d['note'],d['transactionType'],(req.originalInput or '')[:1500],now,now,user_id)).fetchone()
     return {'message':'Transaction saved successfully.','transaction':row_dict(row)}
 @app.get('/api/transactions')
 def transactions_list(user_id: int = Depends(require_session)):
@@ -311,7 +364,7 @@ def summary(user_id: int = Depends(require_session)):
     with connect() as c: rows=c.execute('SELECT amount,category,transactionType FROM transactions WHERE userId=?',(user_id,)).fetchall()
     out={'income':0.0,'expenses':0.0,'balance':0.0,'categories':[]}; grouped={}
     for r in rows:
-        typ=r['transactionType']; cat=r['category']; amount=float(r['amount']); key=(cat,typ)
+        record=db_dict(r); typ=record['transactionType']; cat=record['category']; amount=float(record['amount']); key=(cat,typ)
         grouped.setdefault(key,{'category':cat,'type':typ,'total':0.0,'count':0}); grouped[key]['total']+=amount; grouped[key]['count']+=1
         if typ=='income':out['income']+=amount
         elif typ=='expense':out['expenses']+=amount
@@ -381,8 +434,7 @@ def goal_save(req: GoalSave, user_id: int = Depends(require_session)):
     except Exception: raise HTTPException(400,'Review the goal title, positive target, future deadline, and milestone list.')
     now=datetime.utcnow().isoformat()
     with connect() as c:
-        cur=c.execute('INSERT INTO goals(title,targetAmount,deadline,monthlySaving,milestones,originalInput,createdAt,updatedAt,userId) VALUES(?,?,?,?,?,?,?,?,?)',(title,target,deadline.isoformat(),monthly,json.dumps(milestones),str(g.get('originalInput',''))[:1000],now,now,user_id))
-        row=c.execute('SELECT * FROM goals WHERE id=?',(cur.lastrowid,)).fetchone()
+        row=c.execute('INSERT INTO goals(title,targetAmount,deadline,monthlySaving,milestones,originalInput,createdAt,updatedAt,userId) VALUES(?,?,?,?,?,?,?,?,?) RETURNING *',(title,target,deadline.isoformat(),monthly,json.dumps(milestones),str(g.get('originalInput',''))[:1000],now,now,user_id)).fetchone()
     return {'goal':row_dict(row)}
 @app.get('/api/goals')
 def goals_list(user_id: int = Depends(require_session)):
@@ -391,7 +443,7 @@ def goals_list(user_id: int = Depends(require_session)):
 @app.get('/api/budgets')
 def budgets_list(user_id: int = Depends(require_session)):
     with connect() as c:
-        b={r['category']:dict(r) for r in c.execute('SELECT * FROM budgets WHERE userId=?',(user_id,)).fetchall()}
+        b={r['category']:db_dict(r) for r in c.execute('SELECT * FROM budgets WHERE userId=?',(user_id,)).fetchall()}
         tx=c.execute("SELECT category,SUM(amount) spent FROM transactions WHERE userId=? AND transactionType='expense' AND substr(COALESCE(transactionDate,''),1,7)=? GROUP BY category",(user_id,date.today().strftime('%Y-%m'))).fetchall()
     spent={r['category']:float(r['spent'] or 0) for r in tx}
     return {'budgets':[{'category':cat,'monthlyLimit':float(b.get(cat,{}).get('monthlyLimit',0)),'spent':spent.get(cat,0)} for cat in BUDGET_CATEGORIES]}
@@ -402,13 +454,13 @@ def budget_save(req: BudgetRequest, user_id: int = Depends(require_session)):
     with connect() as c:
         c.execute('INSERT INTO budgets(userId,category,monthlyLimit,createdAt,updatedAt) VALUES(?,?,?,?,?) ON CONFLICT(userId,category) DO UPDATE SET monthlyLimit=excluded.monthlyLimit,updatedAt=excluded.updatedAt',(user_id,req.category,req.monthlyLimit,now,now))
         row=c.execute('SELECT * FROM budgets WHERE userId=? AND category=?',(user_id,req.category)).fetchone()
-    return {'budget':dict(row)}
+    return {'budget':db_dict(row)}
 @app.post('/api/insights/monthly')
 def monthly_insights(req: InsightRequest, user_id: int = Depends(require_session)):
     month=req.month or date.today().strftime('%Y-%m')
     if not re.fullmatch(r'\d{4}-\d{2}',month): raise HTTPException(400,'Month must be YYYY-MM.')
     with connect() as c: rows=c.execute("SELECT * FROM transactions WHERE userId=? AND substr(COALESCE(transactionDate,''),1,7)=? ORDER BY transactionDate",(user_id,month)).fetchall()
-    notes=[{'amount':r['amount'],'type':r['transactionType'],'category':r['category'],'merchant':r['merchant'],'note':r['note'],'date':r['transactionDate']} for r in rows]
+    notes=[{'amount':r['amount'],'type':db_dict(r)['transactionType'],'category':r['category'],'merchant':r['merchant'],'note':r['note'],'date':db_dict(r)['transactionDate']} for r in rows]
     if not notes: return {'insights':{'summary':f'No dated transactions were found for {month}.','patterns':[],'actionItems':['Add or date transactions for this month before generating a meaningful review.'],'transactionsAnalyzed':0,'month':month}}
     if ai:
         try:
