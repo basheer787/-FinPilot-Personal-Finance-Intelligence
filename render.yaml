@@ -1,0 +1,37 @@
+services:
+  - type: web
+    name: finpilot-api
+    runtime: python
+    plan: starter
+    region: singapore
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    disk:
+      name: finpilot-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: SQLITE_PATH
+        value: /var/data/finpilot.db
+      - key: CLIENT_ORIGIN
+        value: https://finpilot-web.onrender.com
+      - key: CLIENT_ORIGIN_REGEX
+        value: ^https://finpilot-web(?:-[a-z0-9-]+)?\.onrender\.com$
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.8-flash
+      - key: SESSION_SECRET
+        generateValue: true
+
+  - type: web
+    name: finpilot-web
+    runtime: static
+    buildCommand: cd frontend && npm ci && npm run build
+    staticPublishPath: frontend/dist
+    envVars:
+      - key: VITE_API_URL
+        value: https://finpilot-api.onrender.com

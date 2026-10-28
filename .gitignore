@@ -1,0 +1,10 @@
+backend/.env
+backend/.venv/
+backend/__pycache__/
+backend/finpilot.db
+backend/test-finpilot.db
+backend/tests/__pycache__/
+*.db
+frontend/node_modules/
+frontend/dist/
+.dist/
